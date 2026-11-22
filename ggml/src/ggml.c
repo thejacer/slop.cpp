@@ -3189,7 +3189,8 @@ struct ggml_tensor * ggml_short_conv(
     }
     if (state) {
         GGML_ASSERT(state->type == GGML_TYPE_F32 && state->nb[0] == sizeof(float));
-        GGML_ASSERT(state->ne[0] == (K - 1)*n_ch && state->ne[1] == past->ne[2] && state->ne[2] == 1);
+        // ne[2] > 1: rollback slots, slot k is the state after all but the last k tokens of a sequence
+        GGML_ASSERT(state->ne[0] == (K - 1)*n_ch && state->ne[1] == past->ne[2] && state->ne[3] == 1);
     }
 
     if (res) {

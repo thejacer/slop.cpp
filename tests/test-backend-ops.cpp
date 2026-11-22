@@ -2598,14 +2598,15 @@ struct test_short_conv : public test_case {
     const int64_t n_head; // 0: no dynamic taps
     const bool    state;
     const bool    res;
+    const int64_t n_slot; // rollback slots of the state
 
     std::string vars() override {
-        return VARS_TO_STR8(n_cg, n_groups, K, n_seq_t, n_seqs, n_head, state, res);
+        return VARS_TO_STR9(n_cg, n_groups, K, n_seq_t, n_seqs, n_head, state, res, n_slot);
     }
 
     test_short_conv(int64_t n_cg = 1024, int64_t n_groups = 1, int64_t K = 4, int64_t n_seq_t = 1, int64_t n_seqs = 1,
-            int64_t n_head = 0, bool state = true, bool res = false)
-        : n_cg(n_cg), n_groups(n_groups), K(K), n_seq_t(n_seq_t), n_seqs(n_seqs), n_head(n_head), state(state), res(res) {}
+            int64_t n_head = 0, bool state = true, bool res = false, int64_t n_slot = 1)
+        : n_cg(n_cg), n_groups(n_groups), K(K), n_seq_t(n_seq_t), n_seqs(n_seqs), n_head(n_head), state(state), res(res), n_slot(n_slot) {}
 
     ggml_tensor * build_graph(ggml_context * ctx) override {
         const int64_t n_ch     = n_cg*n_groups;
@@ -2631,7 +2632,7 @@ struct test_short_conv : public test_case {
 
         ggml_tensor * st = nullptr;
         if (state) {
-            st = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, (K - 1)*n_ch, n_seqs);
+            st = ggml_new_tensor_3d(ctx, GGML_TYPE_F32, (K - 1)*n_ch, n_seqs, n_slot);
             ggml_set_name(st, "state");
         }
 
@@ -11229,6 +11230,8 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
     test_cases.emplace_back(new test_short_conv(2304, 1, 2, 9, 1, 0, true));
     test_cases.emplace_back(new test_short_conv(2304, 1, 4, 1, 1, 0, true, true));
     test_cases.emplace_back(new test_short_conv(1024, 2, 4, 37, 1, 8, true, true));
+    test_cases.emplace_back(new test_short_conv(1024, 2, 4, 4, 1, 8, true, true, 4));
+    test_cases.emplace_back(new test_short_conv(1024, 1, 4, 2, 2, 0, true, false, 8));
 
     for (int64_t n_tokens : {1, 3, 8, 21}) {
         test_cases.emplace_back(new test_loop_ctrl(2304, 64, n_tokens, 1));
@@ -14154,9 +14157,12 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_perf() {
     std::vector<std::unique_ptr<test_case>> test_cases;
 
     // Inkling 2 Mini decode: the expert gate_up and down, and the stacked attention projection
-    test_cases.emplace_back(new test_mul_mat_id(GGML_TYPE_Q8_0, GGML_TYPE_F32, 128, 8, false, 2304, 1, 2304));
-    test_cases.emplace_back(new test_mul_mat_id(GGML_TYPE_Q8_0, GGML_TYPE_F32, 128, 8, false, 2304, 1, 1152));
-    test_cases.emplace_back(new test_mul_mat(GGML_TYPE_Q8_0, GGML_TYPE_F32, 8600, 1, 2304, {1, 1}, {1, 1}));
+    // (n > 1: speculative verification and parallel decoding)
+    for (int n : {1, 2, 3, 4, 5, 6, 8}) {
+        test_cases.emplace_back(new test_mul_mat_id(GGML_TYPE_Q8_0, GGML_TYPE_F32, 128, 8, false, 2304, n, 2304));
+        test_cases.emplace_back(new test_mul_mat_id(GGML_TYPE_Q8_0, GGML_TYPE_F32, 128, 8, false, 2304, n, 1152));
+        test_cases.emplace_back(new test_mul_mat(GGML_TYPE_Q8_0, GGML_TYPE_F32, 8600, n, 2304, {1, 1}, {1, 1}));
+    }
 
     test_cases.emplace_back(new test_timestep_embedding());
     test_cases.emplace_back(new test_timestep_embedding(GGML_TYPE_F32, {32769, 1, 1, 1}, 4096, 10000));

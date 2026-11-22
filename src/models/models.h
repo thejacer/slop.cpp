@@ -1617,6 +1617,11 @@ struct llama_model_dflash : public llama_model_base {
     void load_tensors_dflash2();
     void load_tensors_dflash2_conv();
     void load_tensors_dspark(int64_t n_vocab_draft);
+    void load_tensors_inkling2_head();
+
+    struct graph_inkling2_head : public llm_graph_context {
+        graph_inkling2_head(const llm_graph_params & params);
+    };
     void load_tensors_lilicorr();
     void load_tensors_layers_base();
     void load_tensors_layers_dsv4();
@@ -1645,6 +1650,8 @@ struct llama_model_dflash : public llama_model_base {
         ggml_tensor * build_inject();
         ggml_tensor * build_inp_tokens();
         ggml_tensor * build_layers(ggml_tensor * inp_tokens);
+        ggml_tensor * build_inkling2_embd(ggml_tensor * inp_tokens);
+        ggml_tensor * mix_target_features(ggml_tensor * features, int row, ggml_tensor * norm);
         ggml_tensor * build_logits(ggml_tensor * cur);
         ggml_tensor * build_rope(ggml_tensor * cur, ggml_tensor * pos, int il);
     };
@@ -1659,6 +1666,7 @@ struct llama_model_dflash : public llama_model_base {
 
     struct graph_dspark : public graph_base {
         graph_dspark(const llm_graph_params & params);
+        void build_inkling2_block(ggml_tensor * tokens, ggml_tensor * hidden);
     };
 
     struct graph_lilicorr : public graph_base {
@@ -1682,6 +1690,7 @@ struct llama_model_dflash : public llama_model_base {
     // graph helpers shared by the backbones
     static ggml_tensor * build_inject_inp(llm_graph_context & g, const llama_model & model);
     static ggml_tensor * get_tok_embd(const llm_graph_context & g, const llama_model & model);
+    static ggml_tensor * target_tensor(const llama_model & model, ggml_tensor * t);
     static std::pair<ggml_tensor *, ggml_tensor *> get_lm_head(const llm_graph_context & g, const llama_model & model);
 
     // DFlash2 local conv, run by the base layers of DFlash2 and LiliCorr drafts

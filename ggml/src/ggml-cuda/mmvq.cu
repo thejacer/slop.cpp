@@ -213,7 +213,7 @@ static constexpr __host__ __device__ int get_mmvq_mmid_max_batch_gcn(ggml_type t
         case GGML_TYPE_Q4_K:    return 4;
         case GGML_TYPE_Q5_K:    return 4;
         case GGML_TYPE_Q6_K:    return 4;
-        case GGML_TYPE_Q8_0:    return 4;
+        case GGML_TYPE_Q8_0:    return 8; // gfx906: 5-8 tokens take half the time of the MMQ path
         default:                return MMVQ_MAX_BATCH_SIZE;
     }
 }
@@ -489,9 +489,9 @@ static constexpr __host__ __device__ int calc_nwarps(ggml_type type, int ncols_d
                 return type == GGML_TYPE_Q8_0 ? 1 : 2;
             case 2:
             case 3:
-                return type == GGML_TYPE_Q3_K ? 1 : 2;
+                return type == GGML_TYPE_Q8_0 || type == GGML_TYPE_Q3_K ? 1 : 2;
             case 4:
-                return type == GGML_TYPE_Q6_K? 1 : 2;
+                return type == GGML_TYPE_Q8_0 || type == GGML_TYPE_Q6_K ? 1 : 2;
             case 5:
             case 6:
             case 7:
@@ -647,6 +647,8 @@ static constexpr __host__ __device__ int calc_rows_per_block(ggml_type type, int
             case 2:
             case 3:
             case 4:
+                // Q8_0 on GCN: one warp over 4 rows (gfx906: -15% at 4 tokens)
+                return table_id == MMVQ_PARAMETERS_GCN && type == GGML_TYPE_Q8_0 ? 4 : 2;
             case 5:
             case 6:
             case 7:

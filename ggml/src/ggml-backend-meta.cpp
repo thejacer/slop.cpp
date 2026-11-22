@@ -489,6 +489,22 @@ static struct ggml_tensor * ggml_backend_meta_buffer_simple_tensor(const struct 
     return it->second[index];
 }
 
+static struct ggml_backend_meta_split_state ggml_backend_meta_get_split_state(const struct ggml_tensor * tensor, bool assume_sync);
+
+struct ggml_tensor * ggml_backend_meta_mirrored_tensor(const struct ggml_tensor * tensor, ggml_backend_dev_t dev) {
+    if (tensor == nullptr || tensor->buffer == nullptr || !ggml_backend_buffer_is_meta(tensor->buffer) ||
+            ggml_backend_meta_get_split_state(tensor, /*assume_sync =*/ false).axis != GGML_BACKEND_SPLIT_AXIS_MIRRORED) {
+        return nullptr;
+    }
+    const ggml_backend_meta_buffer_context * buf_ctx = (const ggml_backend_meta_buffer_context *) tensor->buffer->context;
+    for (size_t i = 0; i < buf_ctx->bufs.size(); i++) {
+        if (ggml_backend_buft_get_device(ggml_backend_buffer_get_type(buf_ctx->bufs[i].get())) == dev) {
+            return ggml_backend_meta_buffer_simple_tensor(tensor, i);
+        }
+    }
+    return nullptr;
+}
+
 // bytes spanned by all dims except skip_dim
 static size_t ggml_backend_meta_inner_extent(const struct ggml_tensor * tensor, int skip_dim) {
     size_t extent = 0;

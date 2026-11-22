@@ -2362,10 +2362,11 @@ void ggml_compute_forward_short_conv(const ggml_compute_params * params, ggml_te
             *(float *) ((char *) dst->data + c*sizeof(float) + t*dst->nb[1]) = sum;
         }
 
-        if (state) {
-            float * out = (float *) ((char *) state->data + s*state->nb[1]) + c*(K - 1);
+        // rollback slot k holds the window after token n_seq_t - 1 - k, slots from n_seq_t on stay unwritten
+        for (int64_t k = 0; state && k < std::min(state->ne[2], n_seq_t); ++k) {
+            float * out = (float *) ((char *) state->data + s*state->nb[1] + k*state->nb[2]) + c*(K - 1);
             for (int64_t i = 0; i < K - 1; ++i) {
-                out[i] = xx[n_seq_t + i];
+                out[i] = xx[n_seq_t - k + i];
             }
         }
     }

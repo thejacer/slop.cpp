@@ -473,18 +473,23 @@ ggml_tensor * llama_model_inkling2::graph::convolve(
 
     // one op reads the history and the inputs, writes the new state and does the conv with the dynamic taps
     // cur is [n_channels, n_tokens], or [n_channels/n_groups, n_groups, n_tokens] for matmul outputs side by side in the state
-    if (folded && cparams.n_rs_seq == 0) {
+    if (folded) {
         ggml_tensor * past = ggml_view_3d(ctx0, history, n_conv - 1, n_channels, n_seqs, history->nb[1], history->nb[2], offset*history->nb[1]);
         ggml_tensor * x    = n_groups > 1 ? cur : ggml_view_3d(ctx0, cur, n_channels, 1, n_tokens, cur->nb[1], cur->nb[1], 0);
-        ggml_tensor * cell = ggml_view_2d(ctx0, state, (n_conv - 1)*n_channels, n_seqs, state->nb[1],
+        // with rollback (speculative decoding) slot k of each cell is the state after all but the last k tokens,
+        // the slots are whole copies of the cells, see build_conv_state_store
+        const int64_t n_slot = (int64_t) cparams.n_rs_seq + 1;
+        ggml_tensor * cell = ggml_view_3d(ctx0, state, (n_conv - 1)*n_channels, n_seqs, n_slot, state->nb[1],
+                (size_t) inp->mctx->get_size()*state->nb[1],
                 inp->mctx->get_head()*state->nb[1] + offset*(n_conv - 1)*ggml_element_size(state));
 
         return ggml_short_conv(ctx0, x, past, weight, dynamic, cell, res, scale);
     }
-    GGML_ASSERT(n_groups == 1);
     if (!ggml_is_contiguous(cur)) {
         cur = ggml_cont(ctx0, cur);
     }
+    // grouped inputs are channel-major, so they flatten to [n_channels, n_tokens]
+    cur = ggml_reshape_2d(ctx0, cur, n_channels, n_tokens);
 
     ggml_tensor * past = ggml_view_3d(ctx0, history, n_conv - 1, n_channels, n_seqs, history->nb[1], history->nb[2], offset*history->nb[1]);
 
@@ -849,6 +854,7 @@ ggml_tensor * llama_model_inkling2::graph::build_layer(int il, int ip, ggml_tens
 void llama_model_inkling2::graph::build_output(ggml_tensor * cur, const std::vector<ggml_tensor *> & blocks) {
     cur = ggml_reshape_2d(ctx0, mix(blocks, cur, model.output_res_query), n_embd, n_tokens);
     cur = build_norm(cur, model.output_norm, nullptr, LLM_NORM_RMS, -1);
+    res->t_layer_inp[n_layer] = cur;
 
     if (inp_out_ids) {
         cur = ggml_get_rows(ctx0, cur, inp_out_ids);
@@ -879,6 +885,7 @@ llama_model_inkling2::graph::graph(const llm_graph_params & params) : llm_graph_
 
     std::vector<ggml_tensor *> blocks;
     for (int il = 0; il < n_layer; ++il) {
+        res->t_layer_inp[il] = cur;
         cur = build_layer(il, il, cur, blocks);
     }
 
