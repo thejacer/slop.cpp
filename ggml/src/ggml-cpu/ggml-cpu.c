@@ -2064,6 +2064,22 @@ static void ggml_compute_forward(struct ggml_compute_params * params, struct ggm
             {
                 ggml_compute_forward_sleep(params, tensor);
             } break;
+        case GGML_OP_DEPTH_MIX:
+            {
+                ggml_compute_forward_depth_mix(params, tensor);
+            } break;
+        case GGML_OP_SHORT_CONV:
+            {
+                ggml_compute_forward_short_conv(params, tensor);
+            } break;
+        case GGML_OP_REL_POS_BIAS:
+            {
+                ggml_compute_forward_rel_pos_bias(params, tensor);
+            } break;
+        case GGML_OP_LOOP_CTRL:
+            {
+                ggml_compute_forward_loop_ctrl(params, tensor);
+            } break;
         case GGML_OP_FLASH_ATTN_EXT:
             {
                 ggml_compute_forward_flash_attn_ext(params, tensor);
@@ -2307,6 +2323,10 @@ static int ggml_get_n_tasks(struct ggml_tensor * node, int n_threads) {
         case GGML_OP_CUMSUM:
         case GGML_OP_TRI:
         case GGML_OP_FILL:
+        case GGML_OP_DEPTH_MIX:
+        case GGML_OP_SHORT_CONV:
+        case GGML_OP_REL_POS_BIAS:
+        case GGML_OP_LOOP_CTRL:
             {
                 n_tasks = n_threads;
             } break;
@@ -2384,6 +2404,7 @@ static int ggml_get_n_tasks(struct ggml_tensor * node, int n_threads) {
                 case GGML_GLU_OP_GEGLU_ERF:
                 case GGML_GLU_OP_GEGLU_QUICK:
                 case GGML_GLU_OP_SWIGLU_CLAMP:
+                case GGML_GLU_OP_SITU:
                     {
                         n_tasks = n_threads;
                     } break;

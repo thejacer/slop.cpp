@@ -1554,6 +1554,20 @@ struct llm_graph_context {
                   float   kq_scale,
                     int   il) const;
 
+    // the same with the per-head mask made by kq_b_fn(h0, n_h) for the heads [h0, h0 + n_h): a long context
+    // runs the attention over chunks of heads, so only the mask of one chunk is alive at a time
+    // the output is [n_embd_head_v*n_head_q, n_tokens], without an output projection
+    using kq_b_fn_t = std::function<ggml_tensor * (int64_t h0, int64_t n_h)>;
+    ggml_tensor * build_attn(
+            llm_graph_input_mem_hybrid_iswa_rel * inp,
+            ggml_tensor * q_cur, // [n_embd_head_q, n_head_q, n_tokens]
+            ggml_tensor * k_cur, // [n_embd_head_k, n_head_k, n_tokens]
+            ggml_tensor * v_cur, // [n_embd_head_v, n_head_v, n_tokens]
+            const kq_b_fn_t & kq_b_fn,
+            ggml_tensor * sinks, // [n_head_q]
+                  float   kq_scale,
+                    int   il) const;
+
     //
     // pooling
     //

@@ -1073,6 +1073,14 @@ struct llama_model {
     // optional, runs after the scale pass
     virtual void post_arch_tensors(llama_model_loader &) {}
 
+    // optional, runs after the tensor data is loaded, e.g. to make derived weights
+    virtual void post_load_tensors() {}
+
+    // optional, layers that reuse the weights of an earlier layer (looped models) are placed on the device of that layer
+    // the device split is done over the first n_layer_dev() layers
+    virtual int n_layer_dev() const { return hparams.n_layer_all; }
+    virtual int layer_dev_src(int il) const { return il; }
+
 protected:
     llama_model_params params;
 

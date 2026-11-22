@@ -85,6 +85,10 @@ void ggml_compute_forward_leaky_relu(const struct ggml_compute_params * params, 
 void ggml_compute_forward_tri(const struct ggml_compute_params * params, struct ggml_tensor * dst);
 void ggml_compute_forward_fill(const struct ggml_compute_params * params, struct ggml_tensor * dst);
 void ggml_compute_forward_sleep(const struct ggml_compute_params * params, struct ggml_tensor * dst);
+void ggml_compute_forward_depth_mix(const struct ggml_compute_params * params, struct ggml_tensor * dst);
+void ggml_compute_forward_short_conv(const struct ggml_compute_params * params, struct ggml_tensor * dst);
+void ggml_compute_forward_rel_pos_bias(const struct ggml_compute_params * params, struct ggml_tensor * dst);
+void ggml_compute_forward_loop_ctrl(const struct ggml_compute_params * params, struct ggml_tensor * dst);
 void ggml_compute_forward_flash_attn_ext(const struct ggml_compute_params * params, struct ggml_tensor * dst);
 void ggml_compute_forward_flash_attn_back(
         const struct ggml_compute_params * params,

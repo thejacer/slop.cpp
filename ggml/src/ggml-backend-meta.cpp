@@ -1076,6 +1076,22 @@ static struct ggml_backend_meta_split_state ggml_backend_meta_get_split_state(
             case GGML_OP_FILL: {
                 split_state = handle_generic(src_ss, /*scalar_only =*/ false);
             } break;
+            case GGML_OP_LOOP_CTRL: {
+                // a matmul over the rank, the inputs must not be split
+                split_state = handle_generic(src_ss, /*scalar_only =*/ true);
+            } break;
+            case GGML_OP_REL_POS_BIAS: {
+                // gathers rows of the table by index, the inputs must not be split
+                split_state = handle_generic(src_ss, /*scalar_only =*/ true);
+            } break;
+            case GGML_OP_SHORT_CONV: {
+                // writes the conv state as a side effect, the inputs must not be split
+                split_state = handle_generic(src_ss, /*scalar_only =*/ true);
+            } break;
+            case GGML_OP_DEPTH_MIX: {
+                // reduces over the rows, the inputs must not be split
+                split_state = handle_generic(src_ss, /*scalar_only =*/ true);
+            } break;
             case GGML_OP_FLASH_ATTN_EXT: {
                 split_state = handle_flash_attn_ext(src_ss);
             } break;

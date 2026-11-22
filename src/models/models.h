@@ -2506,6 +2506,8 @@ struct llama_model_inkling2 : public llama_model_base {
 
     // the layers stored in the file
     virtual int n_layer_phys() const { return hparams.n_layer(); }
+    // the physical layer also runs with messages, in the later passes of a loop
+    virtual bool layer_looped(int il) const { GGML_UNUSED(il); return false; }
 
     // message controllers of the q, k, v and ffn inputs of a looped layer (inkling2_loop)
     enum { LOOP_CTRL_Q, LOOP_CTRL_K, LOOP_CTRL_V, LOOP_CTRL_FFN, LOOP_CTRL_COUNT };
@@ -2515,12 +2517,56 @@ struct llama_model_inkling2 : public llama_model_base {
         ggml_tensor * ctrl_down[LOOP_CTRL_COUNT]   = {};
         ggml_tensor * ctrl_gain[LOOP_CTRL_COUNT]   = {};
         ggml_tensor * ctrl_forget[LOOP_CTRL_COUNT] = {};
+
+        // derived: ctrl_gain and ctrl_forget stacked on the output dim and transposed, [2*n_embd, rank]
+        ggml_tensor * ctrl_gain_forget[LOOP_CTRL_COUNT] = {};
+
+        // derived: the q, k and v controllers batched, [2*n_embd, rank, 3] and the transposed gain|forget [2*n_embd, rank, 3]
+        ggml_tensor * ctrl_down_qkv        = nullptr;
+        ggml_tensor * ctrl_gain_forget_qkv = nullptr;
     };
+
+    // derived weights, made after the load, per physical layer (nullptr: use the loaded weights)
+    struct derived_layer {
+        ggml_tensor * rel_bias = nullptr; // attn_rel_bias*relative_clip and a zero row for the far distances, [n_rel, n_extent + 1]
+        ggml_tensor * wqgsr    = nullptr; // wq, wqkv_gate, attn_sink_proj and attn_rel stacked on the output dim
+        ggml_tensor * wqgsr_kv = nullptr; // SWA: wqgsr, wk and wv, for one input of Q, K and V (no messages)
+        ggml_tensor * wkv      = nullptr; // SWA with messages: wk and wv stacked on the output dim
+        ggml_tensor * kv_conv  = nullptr; // SWA: the folded attn_k_conv and attn_v_conv stacked on the channels
+        ggml_tensor * wkvc     = nullptr; // full attention: wk|attn_k_conv_proj and wv|attn_v_conv_proj, [n_embd, n_embd_k_gqa + n_dyn, 2]
+        ggml_tensor * qkv_norm = nullptr; // full attention: attn_q/k/v_inp_norm stacked, [n_embd, 1, 3]
+        bool clip_folded = false;          // wqgsr holds attn_q_clip and attn_rel_clip
+    };
+    std::vector<derived_layer> derived;
+
+    // the conv weights hold the residual tap and the output scale
+    bool conv_folded = false;
+
+    void post_load_tensors() override;
+
+protected:
+    struct derived_fill {
+        ggml_tensor * tensor;
+        std::vector<uint8_t> data;
+    };
+    std::map<ggml_backend_buffer_type_t, ggml_context *> derived_pending_ctx;
+    std::vector<derived_fill> derived_pending;
+    std::vector<ggml_context *>          derived_ctxs;
+    std::vector<ggml_backend_buffer_t>   derived_bufs;
+
+    // a new tensor in the buffer type of src, filled with data by alloc_derived(); nullptr if src is in host memory
+    ggml_tensor * new_derived(const ggml_tensor * src, ggml_type type, int64_t ne0, int64_t ne1, const std::string & name, std::vector<uint8_t> && data,
+            int64_t ne2 = 1);
+    void make_derived();
+    void alloc_derived();
+
+public:
+    ~llama_model_inkling2() override;
 
     struct graph : public llm_graph_context {
         graph(const llm_graph_params & params);
         ggml_tensor * mix(const std::vector<ggml_tensor *> & blocks, ggml_tensor * cur, ggml_tensor * query);
-        ggml_tensor * clip(ggml_tensor * cur, ggml_tensor * scale, float threshold);
+        ggml_tensor * clip_dir(ggml_tensor * cur, ggml_tensor * scale, float threshold);
         ggml_tensor * convolve(
                 ggml_tensor * cur,
                 ggml_tensor * weight,
@@ -2528,10 +2574,19 @@ struct llama_model_inkling2 : public llama_model_base {
                 ggml_tensor * state,
                 ggml_tensor * history,
                 llm_graph_input_rs * inp,
-                int64_t offset);
-        ggml_tensor * control(ggml_tensor * cur, ggml_tensor * message, const loop_layer & loop, int ctrl);
+                int64_t offset,
+                int64_t n_groups = 1,
+                ggml_tensor * res = nullptr);
+        ggml_tensor * control(ggml_tensor * cur, ggml_tensor * cur_norm, ggml_tensor * message, ggml_tensor * message_norm, const loop_layer & loop, int ctrl);
 
     protected:
+        // the normed blocks of a block list, stacked as [n_embd, n_blocks, n_tokens]
+        struct mix_states {
+            ggml_tensor * s = nullptr;
+        };
+        std::map<std::vector<ggml_tensor *>, mix_states> mix_cache;
+        mix_states get_mix_states(const std::vector<ggml_tensor *> & blocks);
+
         // the helpers alone, a derived graph builds its own body
         struct no_build {};
         graph(const llm_graph_params & params, no_build) : llm_graph_context(params) {}
@@ -2549,6 +2604,7 @@ struct llama_model_inkling2 : public llama_model_base {
 
         ggml_tensor * inp_out_ids = nullptr;
         ggml_tensor * tau         = nullptr; // log-scaled positions
+        ggml_tensor * sinks_zero  = nullptr;
     };
 
     std::unique_ptr<llm_graph_context> build_arch_graph(const llm_graph_params & params) const override;
@@ -2563,6 +2619,12 @@ struct llama_model_inkling2_loop : public llama_model_inkling2 {
 
     int n_layer_phys() const override { return n_phys; }
     int layer_phys(int il) const;
+
+    int n_layer_dev() const override { return n_phys; }
+    int layer_dev_src(int il) const override { return layer_phys(il); }
+    bool layer_looped(int il) const override { return n_passes > 1 && il >= (int) core_start && il < (int) core_end; }
+
+    void post_load_tensors() override;
 
     int      n_phys     = 0;
     uint32_t core_start = 0;

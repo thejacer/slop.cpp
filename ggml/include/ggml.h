@@ -433,6 +433,11 @@ extern "C" {
 
         GGML_OP_SLEEP,
 
+        GGML_OP_DEPTH_MIX,
+        GGML_OP_SHORT_CONV,
+        GGML_OP_REL_POS_BIAS,
+        GGML_OP_LOOP_CTRL,
+
         GGML_OP_COUNT,
     };
 
@@ -471,6 +476,7 @@ extern "C" {
         GGML_GLU_OP_GEGLU_ERF,
         GGML_GLU_OP_GEGLU_QUICK,
         GGML_GLU_OP_SWIGLU_CLAMP,
+        GGML_GLU_OP_SITU,
 
         GGML_GLU_OP_COUNT,
     };
@@ -1203,6 +1209,67 @@ extern "C" {
             struct ggml_tensor  * a,
             struct ggml_tensor  * b,
             float                 limit);
+
+    // attention over a stack of states: s = [states[:, :, t], rms_norm(cur[:, t], eps)]
+    // result[:, t, q] = sum_j softmax_j(scale*dot(s[:, j], query[:, q]))*s[:, j]
+    // cur [n_embd, n_tokens], query [n_embd, n_query], states [n_embd, n_states, n_tokens] or NULL, result [n_embd, n_tokens, n_query]
+    GGML_API struct ggml_tensor * ggml_depth_mix(
+            struct ggml_context * ctx,
+            struct ggml_tensor  * cur,
+            struct ggml_tensor  * query,
+            struct ggml_tensor  * states,
+            float                 scale,
+            float                 eps);
+
+    // causal short conv over the time axis with the last K - 1 inputs of each sequence in `past`
+    // x [n_ch/G, G, n_tokens] (channel g*ne0 + i, any strides), past [K - 1, n_ch, n_seqs], weight [K, n_ch], result [n_ch, n_tokens]
+    // result[c, t] = sum_k weight[k, c]*xx[t + k, c] + dyn_scale*sum_k dyn[k + K*h, t]*xx[t + K - 1 - k, c], xx = [past, x]
+    // dyn [K*n_head, n_tokens] or NULL, h = c/(n_ch/n_head)
+    // state (optional) [(K - 1)*n_ch, n_seqs]: the last K - 1 columns of xx are written to it as a side effect
+    // res (optional) [n_ch, n_tokens] is added to the result
+    GGML_API struct ggml_tensor * ggml_short_conv(
+            struct ggml_context * ctx,
+            struct ggml_tensor  * x,
+            struct ggml_tensor  * past,
+            struct ggml_tensor  * weight,
+            struct ggml_tensor  * dyn,
+            struct ggml_tensor  * state,
+            struct ggml_tensor  * res,
+            float                 dyn_scale);
+
+    // gated mix of a message into x: g, f = tanh(wt^T gate) split in halves, result = x - f*x + g*m
+    // gate [rank, n_tokens, G], wt [2*n, rank, G] (the projection transposed), x and m [n, n_tokens, G], result [n, n_tokens, G]
+    GGML_API struct ggml_tensor * ggml_loop_ctrl(
+            struct ggml_context * ctx,
+            struct ggml_tensor  * gate,
+            struct ggml_tensor  * wt,
+            struct ggml_tensor  * x,
+            struct ggml_tensor  * m);
+
+    // per-head attention mask from a relative position bias
+    // result[k, q, h, s] = dot(r'[:, h, t], bias[:, rel_pos[k, t]]) - sinks[h, t] + mask[k, q, 0, s], t = s*(n_tokens/n_stream) + q
+    // r' = r/max(|r|, r_eps) if r_eps > 0 (ggml_l2_norm), else r, times r_scale[t] if given
+    // r [n_rel, n_head, n_tokens], bias [n_rel, n_dist], rel_pos I16 [n_kv, n_tokens] in [0, n_dist), sinks [n_head, n_tokens] or NULL,
+    // mask F16/F32 [n_kv, n_tokens/n_stream, 1, n_stream] or NULL, r_scale [n_tokens] or NULL, result type F16 or F32
+    GGML_API struct ggml_tensor * ggml_rel_pos_bias(
+            struct ggml_context * ctx,
+            struct ggml_tensor  * r,
+            struct ggml_tensor  * bias,
+            struct ggml_tensor  * rel_pos,
+            struct ggml_tensor  * sinks,
+            struct ggml_tensor  * mask,
+            struct ggml_tensor  * r_scale,
+            float                 r_eps,
+            int64_t               n_stream,
+            enum ggml_type        type);
+
+    // situ(a, b) = beta*tanh(a/beta)*sigmoid(a) * linear_beta*tanh(b/linear_beta), b is not squashed if linear_beta <= 0
+    GGML_API struct ggml_tensor * ggml_situ(
+            struct ggml_context * ctx,
+            struct ggml_tensor  * a,
+            struct ggml_tensor  * b,
+            float                 beta,
+            float                 linear_beta);
 
     // normalize along rows
     GGML_API struct ggml_tensor * ggml_norm(

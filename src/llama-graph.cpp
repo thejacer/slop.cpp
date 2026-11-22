@@ -2671,12 +2671,7 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
                     const float beta = hparams.situ_beta;
                     const float lb   = hparams.situ_linear_beta;
 
-                    ggml_tensor * act = ggml_scale(ctx0, ggml_tanh(ctx0, ggml_scale(ctx0, cur, 1.0f/beta)), beta);
-                    act = ggml_mul(ctx0, act, ggml_sigmoid(ctx0, cur));
-                    if (lb > 0.0f) {
-                        up = ggml_scale(ctx0, ggml_tanh(ctx0, ggml_scale(ctx0, up, 1.0f/lb)), lb);
-                    }
-                    cur = ggml_mul(ctx0, act, up);
+                    cur = ggml_situ(ctx0, cur, up, beta, lb);
                     cb(cur, "ffn_moe_situ", il);
                 } break;
             case LLM_FFN_GELU:
@@ -4464,11 +4459,11 @@ llm_graph_input_mem_hybrid_iswa_rel * llm_graph_context::build_inp_mem_hybrid_is
 
     auto inp = std::make_unique<llm_graph_input_mem_hybrid_iswa_rel>(cparams, std::move(inp_attn), std::move(inp_rs), mctx_cur, extent, extent_swa);
 
-    inp->self_rel_pos = ggml_new_tensor_2d(ctx0, GGML_TYPE_I32, attn_ctx->get_base()->get_n_kv(), ubatch.n_tokens);
+    inp->self_rel_pos = ggml_new_tensor_2d(ctx0, GGML_TYPE_I16, attn_ctx->get_base()->get_n_kv(), ubatch.n_tokens);
     ggml_set_input(inp->self_rel_pos);
     ggml_set_name(inp->self_rel_pos, "attn_inp_rel_pos");
 
-    inp->self_rel_pos_swa = ggml_new_tensor_2d(ctx0, GGML_TYPE_I32, attn_ctx->get_swa()->get_n_kv(), ubatch.n_tokens);
+    inp->self_rel_pos_swa = ggml_new_tensor_2d(ctx0, GGML_TYPE_I16, attn_ctx->get_swa()->get_n_kv(), ubatch.n_tokens);
     ggml_set_input(inp->self_rel_pos_swa);
     ggml_set_name(inp->self_rel_pos_swa, "attn_inp_rel_pos_swa");
 
@@ -4498,17 +4493,97 @@ ggml_tensor * llm_graph_context::build_attn(
     GGML_ASSERT(attn_mask.rows == nullptr);
 
     // a mask per head, in the dense layout of the input mask, which flash attention takes in F16
+    // kq_b can be given in F16 already, then the sum is done in F16
+    // a ggml_rel_pos_bias of the input mask holds the sum already
     ggml_tensor * kq_mask = attn_mask.raw;
-    if (kq_mask->type != GGML_TYPE_F32) {
-        kq_mask = ggml_cast(ctx0, kq_mask, GGML_TYPE_F32);
+    if (kq_b->op == GGML_OP_REL_POS_BIAS && kq_b->src[4] == kq_mask) {
+        kq_mask = kq_b;
+    } else {
+        if (kq_mask->type != kq_b->type) {
+            kq_mask = ggml_cast(ctx0, kq_mask, kq_b->type);
+        }
+        kq_mask = ggml_add(ctx0, kq_b, kq_mask);
     }
-    kq_mask = ggml_add(ctx0, kq_b, kq_mask);
-    if (cparams.flash_attn) {
+    if (cparams.flash_attn && kq_mask->type != GGML_TYPE_F16) {
         kq_mask = ggml_cast(ctx0, kq_mask, GGML_TYPE_F16);
     }
     cb(kq_mask, "kq_mask_rel_pos", il);
 
     return build_attn_iswa_impl(*this, inp_attn, wo, wo_b, wo_s, q_cur, k_cur, v_cur, nullptr, kq_mask, nullptr, sinks, nullptr, kq_scale, il);
+}
+
+// the per-head mask of one chunk of heads is at most this big
+static constexpr size_t LLAMA_ATTN_REL_CHUNK_BYTES = 2ull*1024*1024*1024;
+
+ggml_tensor * llm_graph_context::build_attn(
+        llm_graph_input_mem_hybrid_iswa_rel * inp,
+        ggml_tensor * q_cur,
+        ggml_tensor * k_cur,
+        ggml_tensor * v_cur,
+        const kq_b_fn_t & kq_b_fn,
+        ggml_tensor * sinks,
+            float     kq_scale,
+            int       il) const {
+    const bool is_swa = hparams.is_swa(il);
+
+    auto * inp_attn = inp->get_attn();
+    const ggml_tensor * mask = (is_swa ? inp_attn->self_attn_mask_swa : inp_attn->self_attn_mask).raw;
+
+    const int64_t n_head    = q_cur->ne[1];
+    const int64_t n_head_kv = k_cur->ne[1];
+    const int64_t n_gqa     = n_head/n_head_kv;
+    GGML_ASSERT(n_head % n_head_kv == 0);
+
+    // heads per chunk: all of them unless their mask is too big, else a multiple of the GQA ratio that divides n_head
+    const size_t bytes_head = (size_t) mask->ne[0]*mask->ne[1]*mask->ne[3]*(cparams.flash_attn ? sizeof(ggml_fp16_t) : sizeof(float));
+    int64_t n_h = n_head;
+    if (bytes_head*n_head > LLAMA_ATTN_REL_CHUNK_BYTES) {
+        n_h = std::max<int64_t>(n_gqa, (int64_t) (LLAMA_ATTN_REL_CHUNK_BYTES/bytes_head)/n_gqa*n_gqa);
+        while (n_head % n_h != 0) {
+            n_h -= n_gqa;
+        }
+    }
+
+    const auto * mctx_iswa = inp_attn->mctx;
+    const auto * mctx_cur  = is_swa ? mctx_iswa->get_swa() : mctx_iswa->get_base();
+
+    const bool rotated = (is_swa ? inp_attn->self_k_rot_swa[il] : inp_attn->self_k_rot[il]) ||
+                         (is_swa ? inp_attn->self_v_rot_swa[il] : inp_attn->self_v_rot[il]);
+    if (n_h == n_head || rotated || mctx_cur->get_k_scale(il) || mctx_cur->get_v_scale(il) || !cparams.flash_attn) {
+        return build_attn(inp, nullptr, nullptr, nullptr, q_cur, k_cur, v_cur, kq_b_fn(0, n_head), sinks, kq_scale, il);
+    }
+
+    ggml_build_forward_expand(gf, q_cur);
+    ggml_build_forward_expand(gf, k_cur);
+    ggml_build_forward_expand(gf, v_cur);
+
+    ggml_build_forward_expand(gf, mctx_cur->cpy_k(ctx0, k_cur, is_swa ? inp_attn->get_k_idxs_swa() : inp_attn->get_k_idxs(), il));
+    ggml_build_forward_expand(gf, mctx_cur->cpy_v(ctx0, v_cur, is_swa ? inp_attn->get_v_idxs_swa() : inp_attn->get_v_idxs(), il));
+
+    ggml_tensor * k = mctx_cur->get_k(ctx0, il);
+    ggml_tensor * v = mctx_cur->get_v(ctx0, il);
+    GGML_ASSERT(v->nb[1] <= v->nb[2]);
+
+    const int64_t n_h_kv = n_h/n_gqa;
+
+    ggml_tensor * cur = nullptr;
+    for (int64_t h0 = 0; h0 < n_head; h0 += n_h) {
+        const int64_t h0_kv = h0/n_gqa;
+
+        ggml_tensor * q_c = ggml_view_3d(ctx0, q_cur, q_cur->ne[0], n_h, q_cur->ne[2], q_cur->nb[1], q_cur->nb[2], h0*q_cur->nb[1]);
+        ggml_tensor * k_c = ggml_view_4d(ctx0, k, k->ne[0], n_h_kv, k->ne[2], k->ne[3], k->nb[1], k->nb[2], k->nb[3], h0_kv*k->nb[1]);
+        ggml_tensor * v_c = ggml_view_4d(ctx0, v, v->ne[0], n_h_kv, v->ne[2], v->ne[3], v->nb[1], v->nb[2], v->nb[3], h0_kv*v->nb[1]);
+        ggml_tensor * s_c = sinks ? ggml_view_1d(ctx0, sinks, n_h, h0*ggml_element_size(sinks)) : nullptr;
+
+        ggml_tensor * kq_mask = kq_b_fn(h0, n_h);
+        cb(kq_mask, "kq_mask_rel_pos", il);
+
+        ggml_tensor * out = build_attn_mha(q_c, k_c, v_c, nullptr, kq_mask, nullptr, s_c, nullptr, 0, kq_scale, il);
+        cur = cur ? ggml_concat(ctx0, cur, out, 0) : out;
+    }
+    cb(cur, "kqv_out", il);
+
+    return cur;
 }
 
 void llm_graph_context::build_dense_out(

@@ -2008,14 +2008,17 @@ bool llama_kv_cache::has_cell_ext() const {
 }
 
 void llama_kv_cache::set_input_relative_pos(ggml_tensor * dst, const llama_ubatch * ubatch, uint32_t extent) const {
-    GGML_ASSERT(dst->type == GGML_TYPE_I32);
+    GGML_ASSERT(dst->type == GGML_TYPE_I16);
+    GGML_ASSERT(extent <= INT16_MAX);
     const int64_t n_kv = dst->ne[0];
-    std::vector<int32_t> data(n_kv * ubatch->n_tokens);
-    for (uint32_t i = 0; i < ubatch->n_tokens; ++i) {
+    // the distance, or extent for the far and empty cells: the row of the [n_rel, extent + 1] bias table
+    const int64_t n_tokens = ubatch->n_tokens;
+    std::vector<int16_t> data(n_kv * n_tokens);
+    for (int64_t i = 0; i < n_tokens; ++i) {
         const auto & cells = v_cells.at(seq_to_stream.at(ubatch->seq_id[i][0]));
         for (int64_t j = 0; j < n_kv; ++j) {
             const int64_t distance = cells.is_empty(j) ? -1 : int64_t(ubatch->pos[i]) - cells.pos_get(j);
-            data[i*n_kv + j] = distance >= 0 && distance < extent ? distance : extent;
+            data[i*n_kv + j] = (int16_t) (distance >= 0 && distance < extent ? distance : extent);
         }
     }
     ggml_backend_tensor_set(dst, data.data(), 0, ggml_nbytes(dst));

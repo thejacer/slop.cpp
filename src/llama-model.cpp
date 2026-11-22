@@ -545,6 +545,12 @@ struct ggml_backend_meta_split_state llama_meta_device_get_split_state(const str
             // aliased cache slots cannot satisfy the meta-split invariants, so replicate all tensors
             return {GGML_BACKEND_SPLIT_AXIS_MIRRORED, tensor, 0, 0};
         }
+        if (ud->model->arch == LLM_ARCH_INKLING2 || ud->model->arch == LLM_ARCH_INKLING2_LOOP) {
+            // the conv state packs K, V and the n_embd attn/ffn outputs, so split only the experts and mirror the rest
+            if (!std::regex_match(tensor_name, pattern_ffn_gate_up_weight) && !std::regex_match(tensor_name, pattern_ffn_down_weight)) {
+                return get_tensor_config_impl(GGML_BACKEND_SPLIT_AXIS_MIRRORED);
+            }
+        }
         if (is_dsv4) {
             if (std::regex_match(tensor_name, pattern_kv_cache) ||
                     std::regex_match(tensor_name, pattern_dsv4_state)) {
@@ -1806,8 +1812,11 @@ bool llama_model_base::load_tensors(llama_model_loader & ml) {
         splits[i] = split_sum != 0.0f ? splits[i] / split_sum : float(i + 1) / n_devices();
     }
 
-    const int i_gpu_start = std::max(n_layer_all + 1 - n_gpu_layers, 0);
-    const int act_gpu_layers = devices.empty() ? 0 : std::min(n_gpu_layers, n_layer_all + 1);
+    const int n_layer_split = n_layer_dev();
+    GGML_ASSERT(n_layer_split > 0 && n_layer_split <= n_layer_all);
+
+    const int i_gpu_start = std::max(n_layer_split + 1 - n_gpu_layers, 0);
+    const int act_gpu_layers = devices.empty() ? 0 : std::min(n_gpu_layers, n_layer_split + 1);
     auto get_layer_buft_list = [&](int il) -> llama_model::impl::layer_dev {
         const bool is_swa = il < n_layer_all && hparams.is_swa(il);
         if (il < i_gpu_start || (il - i_gpu_start) >= act_gpu_layers) {
@@ -1827,11 +1836,13 @@ bool llama_model_base::load_tensors(llama_model_loader & ml) {
     // assign the repeating layers to the devices according to the splits
     pimpl->dev_layer.resize(n_layer_all);
     for (int il = 0; il < n_layer_all; ++il) {
-        pimpl->dev_layer[il] = get_layer_buft_list(il);
+        const int src = layer_dev_src(il);
+        GGML_ASSERT(src >= 0 && src <= il && src < n_layer_split);
+        pimpl->dev_layer[il] = src == il ? get_layer_buft_list(il) : pimpl->dev_layer[src];
     }
 
     // assign the output layer
-    pimpl->dev_output = get_layer_buft_list(n_layer_all);
+    pimpl->dev_output = get_layer_buft_list(n_layer_split);
 
     const auto TENSOR_NOT_REQUIRED = llama_model_loader::TENSOR_NOT_REQUIRED;
 
@@ -2209,6 +2220,8 @@ bool llama_model_base::load_tensors(llama_model_loader & ml) {
     }
 
     load_tensors_hadamard();
+
+    post_load_tensors();
 
     return true;
 }
